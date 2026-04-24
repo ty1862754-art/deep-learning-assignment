@@ -1,0 +1,45 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+venv*/
+.venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs
+*.log
+logs/
+
+# PyTorch / TensorFlow / model checkpoints
+*.pt
+*.pth
+*.ckpt
+*.h5
+*.model
+
+# Saved models / weights
+/save/
+/model/
+
+# Large numpy / dataset files
+*.npy
+*.npz
+*.hdf5
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
+
+# Environment files
+.env
+pip-log.txt
