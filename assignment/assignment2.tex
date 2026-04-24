@@ -1,0 +1,58 @@
+\documentclass[11pt]{article}
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{enumitem}
+
+\title{Assignment 2 Report: Transformer Encoder-Decoder Analysis}
+\author{Student Name: Weiqiang Duan \\
+Student ID: 12533582}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section*{1.1 Differences Between Encoder and Decoder (Structure and Function)}
+
+\subsection*{1) Structural Differences}
+The encoder and decoder are both built from repeated blocks, but I found while reading and completing the code that their internal sublayers differ in an important way. In my implementation, each encoder block contains a self-attention layer followed by a position-wise feed-forward network. 
+
+The decoder block adds two specific components on top of that: a masked (causal) self-attention layer and a cross-attention layer that attends to the encoder outputs. Practically, this is why the encoder layers are implemented with two residual connections per block, while the decoder has three — the extra residual path simply reflects the additional cross-attention sublayer.
+
+\subsection*{2) Functional Differences}
+From a usage perspective, I think of the encoder as the component that ``reads'' the whole source sentence and builds contextualized representations. Every non-PAD source position can attend to all other valid source positions simultaneously. 
+
+The decoder, on the other hand, is the generator. It works autoregressively: it learns to predict the next token conditioned on previous target tokens and the encoder output. Concretely, the decoder uses a causal mask so each position only sees earlier target tokens, and then utilizes cross-attention to pull relevant information from the encoder representations to condition the generation on the source meaning.
+
+
+\section*{1.2 Attention Masks in Encoder/Decoder and Why They Are Needed}
+
+\subsection*{1) Implementation of Masks}
+In the implementation, the masking happens inside the scaled dot-product attention:
+\[
+\text{scores} = \frac{QK^{T}}{\sqrt{d_k}},\qquad
+\text{scores} \leftarrow \text{scores.masked\_fill}(\text{mask}==0, -10^9)
+\]
+Masked positions receive a very large negative score, resulting in effectively zero probability after softmax. 
+
+Concretely, I built the source padding mask as \texttt{src\_mask = (src != PAD).unsqueeze(1).unsqueeze(1)} with shape \texttt{[B, 1, 1, src\_len]}. For the decoder, the code combines a padding mask with a causal mask (from \texttt{casual\_mask(size)}); the final \texttt{tgt\_mask} is the logical AND of these, ensuring both PAD positions and future positions are blocked.
+
+\subsection*{2) Why Masks Are Necessary}
+In practice, these masks solve two clear problems:
+
+First, padding tokens are artificial items used purely for batch shape alignment and should not contribute to attention. I once tracked a strange loss instability to the model attending to PAD positions before I properly added the padding mask. Blocking them keeps context vectors clean.
+
+Second, the causal mask for the decoder prevents information leakage. Without a causal mask in decoder self-attention, the token at time step $t$ could directly read future ground-truth tokens during training. The model would learn an unrealistic shortcut and fail completely at inference. Together, these masks keep the probability mass focused on valid tokens and make training stable and correct.
+
+
+\section*{1.3 Differences Between Decoder Training and Inference}
+
+\subsection*{1) Input/Output Behavior and Computation}
+In my training code, I used teacher forcing: the decoder receives the ground-truth target sequence shifted right (\texttt{tgt[:, :-1]}) and predicts the next tokens (\texttt{tgt[:, 1:]}). This allows the network to be trained in parallel across all time steps (with the causal mask in place), leading to high GPU utilization. 
+
+By contrast, at inference, I run an autoregressive loop starting from \texttt{BOS}. The model repeatedly builds the current decoder mask and appends the highest-probability token (greedy decoding) until it hits \texttt{EOS} or the length limit. I noticed this inference loop is much slower per sentence because each step strictly depends on the output of the previous step.
+
+\subsection*{2) Distribution Mismatch}
+One practical consequence I keep in mind is the train/inference mismatch. During training, the decoder always conditions on correct previous tokens (gold standards). However, during inference, it consumes its own predictions. This discrepancy can cause error accumulation (exposure bias): a single wrong early token can cascade and harm later predictions. This fundamentally explains why generation tasks require careful decoding strategies at inference time.
+
+\end{document}
