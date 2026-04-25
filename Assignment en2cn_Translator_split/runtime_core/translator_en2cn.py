@@ -5,12 +5,14 @@
 
 from model.transformer import build_transformer
 from tokenization import PrepareData, MaskBatch
+import json
 import os
 import time
 import torch
 import torch.nn as nn
 import numpy as np
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 
 import warnings
 warnings.filterwarnings('ignore') # Filtering warnings
@@ -40,13 +42,15 @@ def get_config(debug=True):
             'dev_file': 'data/en-cn/dev_mini.txt',
             'save_file': 'save/models/model.pt',
             'checkpoint_file': 'save/models/checkpoint.pt',
-            'best_model_file': 'save/models/best_model.pt'
+            'best_model_file': 'save/models/best_model.pt',
+            'loss_history_file': 'save/models/loss_history.json',
+            'loss_curve_file': 'save/models/loss_curve.png'
         }
     else:
         return{
             'lr': 1e-4,
             'batch_size': 64,
-            'num_epochs': 20,
+            'num_epochs': 30,
             'n_layer': 6,
             'h_num': 8,
             'd_model': 256, # Dimensions of the embeddings in the Transformer
@@ -57,7 +61,9 @@ def get_config(debug=True):
             'dev_file': 'data/en-cn/dev.txt',
             'save_file': 'save/models/model.pt',
             'checkpoint_file': 'save/models/checkpoint.pt',
-            'best_model_file': 'save/models/best_model.pt'
+            'best_model_file': 'save/models/best_model.pt',
+            'loss_history_file': 'save/models/loss_history.json',
+            'loss_curve_file': 'save/models/loss_curve.png'
         }
 
 
@@ -95,7 +101,7 @@ loss_fn = nn.CrossEntropyLoss(ignore_index=PAD, label_smoothing=0.).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'], eps = 1e-9)
 
 
-def save_checkpoint(checkpoint_path, model, optimizer, epoch, global_step, loss_value, best_loss):
+def save_checkpoint(checkpoint_path, model, optimizer, epoch, global_step, loss_value, best_loss, loss_history):
     checkpoint = {
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
@@ -103,6 +109,7 @@ def save_checkpoint(checkpoint_path, model, optimizer, epoch, global_step, loss_
         'global_step': global_step,
         'loss': float(loss_value),
         'best_loss': float(best_loss),
+        'loss_history': loss_history,
     }
     os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
     torch.save(checkpoint, checkpoint_path)
@@ -110,7 +117,7 @@ def save_checkpoint(checkpoint_path, model, optimizer, epoch, global_step, loss_
 
 def load_checkpoint_if_exists(checkpoint_path, model, optimizer, device):
     if not os.path.exists(checkpoint_path):
-        return 0, 0, float('inf'), float('inf')
+        return 0, 0, float('inf'), float('inf'), []
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(checkpoint['model_state_dict'])
@@ -119,8 +126,35 @@ def load_checkpoint_if_exists(checkpoint_path, model, optimizer, device):
     global_step = checkpoint.get('global_step', 0)
     last_loss = checkpoint.get('loss', float('inf'))
     best_loss = checkpoint.get('best_loss', last_loss)
+    loss_history = checkpoint.get('loss_history', [])
+    # Backward compatibility: old checkpoint may not have loss history.
+    if not loss_history and checkpoint.get('epoch', None) is not None and np.isfinite(last_loss):
+        loss_history = [{'epoch': int(checkpoint['epoch']), 'loss': float(last_loss)}]
     print(f"Loaded checkpoint from {checkpoint_path} (resume at epoch {initial_epoch})")
-    return initial_epoch, global_step, last_loss, best_loss
+    return initial_epoch, global_step, last_loss, best_loss, loss_history
+
+
+def save_loss_artifacts(loss_history, history_path, curve_path):
+    if not loss_history:
+        return
+
+    os.makedirs(os.path.dirname(history_path), exist_ok=True)
+
+    with open(history_path, 'w', encoding='utf-8') as f:
+        json.dump(loss_history, f, ensure_ascii=False, indent=2)
+
+    epochs = [item['epoch'] for item in loss_history]
+    losses = [item['loss'] for item in loss_history]
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(epochs, losses, marker='o', linewidth=1.8)
+    plt.title('Training Loss Curve')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.grid(True, linestyle='--', alpha=0.5)
+    plt.tight_layout()
+    plt.savefig(curve_path, dpi=160)
+    plt.close()
 
 
 
@@ -219,7 +253,7 @@ print(">>>>>>> start train")
 train_start = time.time()
 
 # Initializing epoch and global step variables
-initial_epoch, global_step, last_loss, best_loss = load_checkpoint_if_exists(
+initial_epoch, global_step, last_loss, best_loss, loss_history = load_checkpoint_if_exists(
     config['checkpoint_file'], model, optimizer, device
 )
 
@@ -228,6 +262,8 @@ for epoch in range(initial_epoch, config['num_epochs']):
     # Initializing an iterator over the training dataloader
     # We also use tqdm to display a progress bar
     batch_iterator = tqdm(data.train_data, desc = f'Processing epoch {epoch:02d}')
+    epoch_loss_sum = 0.0
+    epoch_step_count = 0
     
     # For each batch...
     for batch in batch_iterator:
@@ -255,6 +291,8 @@ for epoch in range(initial_epoch, config['num_epochs']):
         # Updating progress bar
         batch_iterator.set_postfix({f"loss": f"{loss.item():6.3f}"})
         last_loss = loss.item()
+        epoch_loss_sum += last_loss
+        epoch_step_count += 1
         
         # Performing backpropagation
         loss.backward()
@@ -271,15 +309,19 @@ for epoch in range(initial_epoch, config['num_epochs']):
     if epoch % 5 == 0:
         run_validation(model, data, data.cn_word_dict, config['seq_len'], device, lambda msg: batch_iterator.write(msg))
 
+    epoch_loss = epoch_loss_sum / max(epoch_step_count, 1)
+    loss_history.append({'epoch': int(epoch), 'loss': float(epoch_loss)})
+    print(f"Epoch {epoch:02d} average loss: {epoch_loss:.6f}")
+
     # Save best model based on the minimum epoch-ending loss.
-    if last_loss < best_loss:
-        best_loss = last_loss
+    if epoch_loss < best_loss:
+        best_loss = epoch_loss
         os.makedirs(os.path.dirname(config['best_model_file']), exist_ok=True)
         torch.save(model.state_dict(), config['best_model_file'])
         print(f"Saved best model to {config['best_model_file']} (loss={best_loss:.6f})")
 
     # Save full checkpoint after each epoch.
-    save_checkpoint(config['checkpoint_file'], model, optimizer, epoch, global_step, last_loss, best_loss)
+    save_checkpoint(config['checkpoint_file'], model, optimizer, epoch, global_step, epoch_loss, best_loss, loss_history)
 
 print(f"<<<<<<< finished train, cost {time.time()-train_start:.4f} seconds")
 
@@ -287,6 +329,10 @@ print(f"<<<<<<< finished train, cost {time.time()-train_start:.4f} seconds")
 os.makedirs(os.path.dirname(config['save_file']), exist_ok=True)
 torch.save(model.state_dict(), config['save_file'])
 print(f"Saved final weights to {config['save_file']}")
+
+save_loss_artifacts(loss_history, config['loss_history_file'], config['loss_curve_file'])
+print(f"Saved loss history to {config['loss_history_file']}")
+print(f"Saved loss curve to {config['loss_curve_file']}")
 
 
 
